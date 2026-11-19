@@ -1,0 +1,137 @@
+<!DOCTYPE html><html lang="es"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Selva Mortal</title>
+<style>
+body{margin:0;background:#12201a;color:#fff;font:16px sans-serif;overflow:hidden}
+#ui{position:fixed;inset:0;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:12px;background:#12201a;z-index:5;text-align:center}
+#ui[hidden]{display:none}
+.m{position:relative;width:110px;height:110px;background:#c98a4b;border-radius:50%;animation:b 1s infinite alternate;margin-top:20px}
+.m:before,.m:after{content:"";position:absolute;top:-14px;width:36px;height:36px;background:#c98a4b;border-radius:50%}
+.m:before{left:4px}.m:after{right:4px}
+.m i{position:absolute;top:42px;width:14px;height:14px;background:#111;border-radius:50%}
+.m i:first-child{left:28px}.m i:last-child{right:28px}
+@keyframes b{to{transform:translateY(-14px)}}
+input,button{font:inherit;padding:10px 16px;border-radius:10px;border:0}button{background:#f2b632;font-weight:700}
+</style></head><body>
+<div id="ui"><div class="m"><i></i><i></i></div><h1>SELVA MORTAL</h1><div id="ld">Conectando…</div>
+<div id="nm" hidden><input id="ni" maxlength="14" placeholder="Tu nombre"> <button id="nb">Guardar</button><p id="ms"></p><button id="go">ENTRAR EN VR</button></div></div>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
+<script>
+// Cambia esto por la URL de tu servidor (wss://... si tu página es https)
+const SERVER='ws://localhost:8080';
+const PR={pico:100,mochila:120,mp40:150,rifle:300,escopeta:250,sniper:600};
+const WS={pistola:[.35,1,0x999999],mp40:[.09,1,0x445577],rifle:[.15,1,0x556b2f],escopeta:[.8,7,0x8b5a2b],sniper:[1.4,1,0x222222]};
+const $=i=>document.getElementById(i);
+let tok=localStorage.tok;if(!tok)localStorage.tok=tok=Math.random().toString(36).slice(2)+Date.now().toString(36);
+let me=null,myId=0,hp=100,lastHp=100,cur='pistola',ws;
+const send=o=>ws&&ws.readyState==1&&ws.send(JSON.stringify(o));
+
+// ---- escena ----
+const R=new THREE.WebGLRenderer({antialias:true});R.setSize(innerWidth,innerHeight);R.xr.enabled=true;document.body.appendChild(R.domElement);
+const S=new THREE.Scene();S.background=new THREE.Color(0x1b2a1f);S.fog=new THREE.Fog(0x1b2a1f,8,60);
+const cam=new THREE.PerspectiveCamera(70,innerWidth/innerHeight,.05,200),rig=new THREE.Group();rig.add(cam);S.add(rig);
+S.add(new THREE.HemisphereLight(0xcfe8ff,0x334422,1.1));
+const gnd=new THREE.Mesh(new THREE.PlaneGeometry(300,300),new THREE.MeshLambertMaterial({color:0x2f4a2a}));gnd.rotation.x=-Math.PI/2;S.add(gnd);
+let sd=7;const rn=()=>(sd=(sd*16807)%2147483647)/2147483647;
+const boxes=[],bm=new THREE.MeshLambertMaterial({color:0x6b6b5a});
+for(let i=0;i<45;i++){const w=1+rn()*3,d=1+rn()*3,h=.6+rn()*3.5,x=(rn()-.5)*130,z=(rn()-.5)*130;
+ if(Math.hypot(x,z)<8)continue;boxes.push({x,z,w,d,h});
+ const m=new THREE.Mesh(new THREE.BoxGeometry(w,h,d),bm);m.position.set(x,h/2,z);S.add(m)}
+function lab(t,c='#fff',w=256){const cv=document.createElement('canvas');cv.width=w;cv.height=64;const g=cv.getContext('2d');
+ g.font='bold 34px sans-serif';g.textAlign='center';g.fillStyle=c;g.fillText(t,w/2,44);
+ const s=new THREE.Sprite(new THREE.SpriteMaterial({map:new THREE.CanvasTexture(cv),depthTest:false}));s.scale.set(w/256*.8,.2,1);return s}
+
+// tienda: toca un objeto con la mano para comprarlo
+const shop=Object.keys(PR).map((k,i)=>{const m=new THREE.Mesh(new THREE.BoxGeometry(.3,.3,.3),new THREE.MeshLambertMaterial({color:0xf2b632}));
+ m.position.set((i-2.5)*1.1,1.1,-3);const l=lab(k+' $'+PR[k],'#fd6',300);l.position.y=.35;m.add(l);S.add(m);return{k,m}});
+S.add(Object.assign(lab('TIENDA','#fff',256),{position:new THREE.Vector3(0,2.2,-3)}));
+
+// HUD
+const hc=document.createElement('canvas');hc.width=512;hc.height=96;const hg=hc.getContext('2d'),ht=new THREE.CanvasTexture(hc);
+const hm=new THREE.Mesh(new THREE.PlaneGeometry(.4,.075),new THREE.MeshBasicMaterial({map:ht,transparent:true,depthTest:false}));
+hm.position.set(0,-.2,-.6);hm.renderOrder=9;cam.add(hm);
+function hud(){hg.clearRect(0,0,512,96);hg.fillStyle='#0008';hg.fillRect(0,0,512,96);hg.fillStyle='#fff';hg.font='bold 34px sans-serif';
+ hg.fillText('❤'+Math.ceil(hp)+'  $'+(me?me.m:0)+'  '+cur,14,60);ht.needsUpdate=true}
+
+// manos y arma
+const hs=new THREE.SphereGeometry(.07),hmt=new THREE.MeshLambertMaterial({color:0xc98a4b});
+const VH={left:new THREE.Mesh(hs,hmt),right:new THREE.Mesh(hs,hmt)};S.add(VH.left,VH.right);
+const gun=new THREE.Mesh(new THREE.BoxGeometry(.05,.08,.3),new THREE.MeshLambertMaterial());gun.position.z=-.1;
+const equip=()=>{gun.material.color.setHex(WS[cur][2]);hud()};equip();
+const H={},pl={},pt={};
+for(let i=0;i<2;i++){const c=R.xr.getController(i);rig.add(c);
+ c.addEventListener('connected',e=>{c.userData.s=e.data;H[e.data.handedness]=c;if(e.data.handedness=='right')c.add(gun)})}
+
+// ---- movimiento: brazos largos, empuja/escala superficies ----
+const vel=new THREE.Vector3(),tmp=new THREE.Vector3();
+const inBox=(p,b)=>Math.abs(p.x-b.x)<b.w/2+.1&&Math.abs(p.z-b.z)<b.d/2+.1&&p.y<b.h+.1;
+function move(dt){
+ const d=new THREE.Vector3();let n=0;
+ for(const k of['left','right']){const c=H[k];if(!c)continue;
+  const lp=cam.position.clone().add(c.position.clone().sub(cam.position).multiplyScalar(1.5));
+  const wp=lp.clone().add(rig.position);VH[k].position.copy(wp);
+  const touch=wp.y<.12||boxes.some(b=>inBox(wp,b));
+  if(touch&&pt[k]&&pl[k]){d.add(pl[k].clone().sub(lp));n++}
+  pl[k]=lp;pt[k]=touch}
+ if(n){d.divideScalar(n).clampLength(0,.6);rig.position.add(d);vel.copy(d).divideScalar(dt).clampLength(0,12)}
+ else{vel.y-=9.8*dt;vel.multiplyScalar(1-dt*.3);rig.position.addScaledVector(vel,dt)}
+ if(rig.position.y<0){rig.position.y=0;vel.y=0;vel.x*=.8;vel.z*=.8}
+ cam.getWorldPosition(tmp);
+ for(const b of boxes){if(tmp.y<b.h+.2){const ox=b.w/2+.25-Math.abs(tmp.x-b.x),oz=b.d/2+.25-Math.abs(tmp.z-b.z);
+  if(ox>0&&oz>0){if(ox<oz)rig.position.x+=Math.sign(tmp.x-b.x)*ox;else rig.position.z+=Math.sign(tmp.z-b.z)*oz}}}
+}
+// ---- armas ----
+let gp=false,lastShot=0;const rc=new THREE.Raycaster();
+function input(t){const c=H.right;if(!c||!c.userData.s||!c.userData.s.gamepad)return;const b=c.userData.s.gamepad.buttons;
+ const g=b[1]&&b[1].pressed;if(g&&!gp){const o=me.own.filter(k=>WS[k]);cur=o[(o.indexOf(cur)+1)%o.length];equip()}gp=g;
+ if(b[0]&&b[0].pressed&&t-lastShot>WS[cur][0]*1000){lastShot=t;shoot(c)}}
+function shoot(c){const o=new THREE.Vector3(),q=new THREE.Quaternion();c.getWorldPosition(o);c.getWorldQuaternion(q);
+ const n=WS[cur][1],sp=n>1?.15:0,hit={};
+ for(let i=0;i<n;i++){const d=new THREE.Vector3((Math.random()-.5)*sp,(Math.random()-.5)*sp,-1).normalize().applyQuaternion(q);
+  rc.set(o,d);rc.far=cur=='sniper'?150:60;const r=rc.intersectObjects(Object.values(MM),true)[0];
+  if(r){let ob=r.object;while(!ob.userData.id)ob=ob.parent;hit[ob.userData.id]=(hit[ob.userData.id]||0)+1}}
+ for(const id in hit)send({t:'hit',id:+id,w:cur,n:hit[id]})}
+let lastBuy=0;
+function shopCheck(t){if(t-lastBuy<1200)return;
+ for(const it of shop)for(const k in VH)if(VH[k].position.distanceTo(it.m.position)<.4&&!me.own.includes(it.k)){lastBuy=t;send({t:'buy',k:it.k});return}}
+
+// ---- red: estado del mundo ----
+const RP={},MM={},CM={};
+const col=n=>new THREE.Color().setHSL([...n].reduce((a,c)=>a+c.charCodeAt(0),0)%360/360,.6,.5);
+function mkP(p){const g=new THREE.Group(),mt=new THREE.MeshLambertMaterial({color:col(p.n)});
+ g.h=new THREE.Mesh(new THREE.SphereGeometry(.17),mt);
+ for(const x of[-1,1]){const e=new THREE.Mesh(new THREE.SphereGeometry(.07),mt);e.position.set(x*.13,.15,0);g.h.add(e)}
+ g.l=new THREE.Mesh(hs,mt);g.r=g.l.clone();g.n=lab(p.n);g.add(g.h,g.l,g.r,g.n);return g}
+function mkM(e){const g=new THREE.Group(),b=new THREE.Mesh(new THREE.IcosahedronGeometry(.7),new THREE.MeshLambertMaterial({color:0x7a1020}));b.position.y=.8;g.add(b);
+ for(const x of[-1,1]){const y=new THREE.Mesh(new THREE.SphereGeometry(.1),new THREE.MeshBasicMaterial({color:0xffee66}));y.position.set(x*.25,.95,.6);g.add(y)}
+ g.userData.id=e[0];return g}
+const mkC=()=>new THREE.Mesh(new THREE.SphereGeometry(.15),new THREE.MeshBasicMaterial({color:0xffd700}));
+function sync(M,list,mk,up,idf){const seen=new Set();
+ for(const e of list){const k=idf(e);seen.add(k);let o=M[k];if(!o){o=M[k]=mk(e);S.add(o)}up(o,e)}
+ for(const k in M)if(!seen.has(+k)){S.remove(M[k]);delete M[k]}}
+function state(m){
+ sync(RP,m.p.filter(p=>p.id!=myId),mkP,(o,p)=>{o.h.position.set(...p.h);o.l.position.set(...p.l);o.r.position.set(...p.r);o.n.position.set(p.h[0],p.h[1]+.35,p.h[2])},p=>p.id);
+ for(const p of m.p)if(p.id==myId)hp=p.hp;
+ sync(MM,m.m,mkM,(o,e)=>o.position.set(e[1],0,e[2]),e=>e[0]);
+ sync(CM,m.c,mkC,(o,e)=>o.position.set(e[1],e[2],e[3]),e=>e[0]);
+ if(Math.ceil(hp)!=lastHp){lastHp=Math.ceil(hp);hud()}}
+function conn(){ws=new WebSocket(SERVER);ws.onopen=()=>send({t:'hi',tok});
+ ws.onclose=()=>{$('ld').hidden=0;$('ld').textContent='Sin conexión… reintentando';setTimeout(conn,2000)};
+ ws.onmessage=e=>{const m=JSON.parse(e.data);
+  if(m.t=='me'){me=m.u;myId=m.id;if(m.tp){rig.position.set(0,0,0);vel.set(0,0,0)}
+   if(!me.own.includes(cur))cur='pistola';equip();
+   if(!R.xr.isPresenting){$('ld').hidden=1;$('nm').hidden=0;$('ni').value=me.n||'';
+    $('ms').textContent=me.n?(me.ch>=1?'Ya usaste tu único cambio de nombre':'Puedes cambiar tu nombre 1 vez'):'Elige tu nombre (después solo 1 cambio)'}}
+  else if(m.t=='err')$('ms').textContent=m.e;
+  else if(m.t=='s')state(m)}}
+$('nb').onclick=()=>{if(me.n&&!confirm('Solo puedes cambiarlo 1 vez. ¿Seguro?'))return;send({t:'name',n:$('ni').value.trim()})};
+$('go').onclick=async()=>{if(!me||!me.n)return $('ms').textContent='Guarda un nombre primero';
+ if(!navigator.xr)return $('ms').textContent='Sin WebXR: abre esto en el Navegador del Quest';
+ const s=await navigator.xr.requestSession('immersive-vr',{optionalFeatures:['local-floor']});R.xr.setSession(s);
+ $('ui').hidden=1;s.addEventListener('end',()=>$('ui').hidden=0)};
+let last=0,lastNet=0;
+R.setAnimationLoop(t=>{const dt=Math.min((t-last)/1000||.016,.05);last=t;
+ if(R.xr.isPresenting&&me){move(dt);input(t);shopCheck(t);
+  if(t-lastNet>66){lastNet=t;cam.getWorldPosition(tmp);
+   send({t:'pos',h:tmp.toArray(),l:VH.left.position.toArray(),r:VH.right.position.toArray()});lastNet=t}}
+ R.render(S,cam)});
+conn();
+</script></body></html>
